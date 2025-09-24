@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>Museum — Spotlight on Statue</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; overflow:hidden; font-family:Arial, sans-serif; color:white; }
+    #info {
+      position:absolute; top:10px; left:10px;
+      padding:8px 12px; background:rgba(0,0,0,0.6); border-radius:6px;
+      font-size:14px; line-height:1.5;
+    }
+    canvas { display:block; }
+  </style>
+</head>
+
+<body>
+  <div id="info">
+    <b>Controls:</b><br>
+    R = toggle autorotate<br>
+    Q = toggle floor colors (green/yellow)<br>
+    W = toggle floor colors (black/white)<br>
+    T = toggle painting animation style (disco / stripes) + frame animation
+  </div>
+
+  <script type="module">
+    import * as THREE from './js/three.module.js';
+    import { OrbitControls } from './js/OrbitControls.js';
+    import { GLTFLoader } from './js/GLTFLoader.js';
+
+    // --- Scene / Camera / Renderer ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(0, 6, 18);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.physicallyCorrectLights = true;
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    document.body.appendChild(renderer.domElement);
+
+    // --- Controls ---
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.set(0, 2, 0);
+    let autoRotate = false;
+
+    // --- Floor (custom shader) ---
+    const floorUniforms = {
+      color1: { value: new THREE.Color(0x111111) },
+      color2: { value: new THREE.Color(0xaaaaaa) }
+    };
+    const floorShader = {
+      uniforms: floorUniforms,
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 10.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+        }`,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform vec3 color1;
+        uniform vec3 color2;
+        void main() {
+          float cx = step(0.5, fract(vUv.x));
+          float cy = step(0.5, fract(vUv.y));
+          float c = mod(cx+cy,2.0);
+          gl_FragColor = vec4(mix(color1, color2, c), 1.0);
+        }`
+    };
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(40,40), new THREE.ShaderMaterial({...floorShader, side: THREE.DoubleSide}));
+    floor.rotation.x = -Math.PI/2;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    // Shadow catcher
+    const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(40,40), new THREE.ShadowMaterial({opacity:0.35}));
+    shadowPlane.rotation.x = -Math.PI/2;
+    shadowPlane.receiveShadow = true;
+    scene.add(shadowPlane);
+
+    // --- Walls (textured) ---
+    const texLoader = new THREE.TextureLoader();
+    const wallTexture = texLoader.load('./wall.jpg');
+    const wallMat = new THREE.MeshStandardMaterial({ map: wallTexture });
+
+    const wallThickness = 0.5;
+    const wallWidth = 40;          // cover whole floor
+    const wallHeight = 10;
+    const wallY = wallHeight/2 + wallThickness/2;
+
+    const leftWall = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, wallHeight, wallWidth), wallMat);
+    leftWall.position.set(-20 - wallThickness/2, wallY, 0);
+    scene.add(leftWall);
+
+    const rightWall = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, wallHeight, wallWidth), wallMat);
+    rightWall.position.set(20 + wallThickness/2, wallY, 0);
+    scene.add(rightWall);
+
+    const backWall = new THREE.Mesh(new THREE.BoxGeometry(wallWidth + 1, wallHeight, wallThickness), wallMat);
+    backWall.position.set(0, wallY, -20 - wallThickness/2);
+    scene.add(backWall);
+
+    // --- Painting (custom shader) & framed border (no occlusion) ---
+    const paintingGroup = new THREE.Group();
+    scene.add(paintingGroup);
+
+    // painting size & frame params
+    const paintingW = 8.0;
+    const paintingH = 5.0;
+    const frameDepth = 0.3;
+    const frameBarThickness = 0.35;
+    const frameColor = 0xFFD700;
+
+    // shader uniforms (use float style for robust passing)
+    const paintingUniforms = {
+      time: { value: 0.0 },
+      style: { value: 0.0 } // 0 => disco blocks, 1 => rainbow stripes
+    };
+
+    const paintingVertex = `
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+      }`;
+
+    const paintingFragment = `
+      uniform float time;
+      uniform float style;
+      varying vec2 vUv;
+
+      float rand(vec2 co){
+        return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
+      }
+
+      void main(){
+        vec3 color;
+
+        if (style < 0.5) {
+          // Disco blocks blinking independently: 10x10 grid
+          float t = floor(time * 2.0);           // step every 0.5s
+          vec2 block = floor(vUv * 10.0);
+          // include block coordinates => different seeds per tile + time
+          float r = rand(block + vec2(t, 1.0));
+          float g = rand(block + vec2(t, 2.0));
+          float b = rand(block + vec2(t, 3.0));
+          color = vec3(r, g, b);
+        } else {
+          // Flowing rainbow stripes
+          color = vec3(
+            0.5 + 0.5 * sin(10.0 * vUv.x + time * 4.0),
+            0.5 + 0.5 * sin(10.0 * vUv.y + time * 5.0 + 2.0),
+            0.5 + 0.5 * sin((vUv.x + vUv.y) * 10.0 + time * 3.0)
+          );
+        }
+
+        gl_FragColor = vec4(color, 1.0);
+      }`;
+
+    // painting plane sits slightly in front of the frame face so it's always visible
+    const paintingCanvas = new THREE.Mesh(
+      new THREE.PlaneGeometry(paintingW, paintingH),
+      new THREE.ShaderMaterial({
+        uniforms: paintingUniforms,
+        vertexShader: paintingVertex,
+        fragmentShader: paintingFragment,
+        side: THREE.DoubleSide
+      })
+    );
+    paintingCanvas.position.z = frameDepth/2 + 0.02; // slightly in front of frame
+    paintingGroup.add(paintingCanvas);
+
+    // Build frame as four bars (no occlusion of center)
+    const barDepth = frameDepth;
+    const barMat = new THREE.MeshStandardMaterial({ color: frameColor });
+
+    // left bar
+    const leftBar = new THREE.Mesh(new THREE.BoxGeometry(frameBarThickness, paintingH + frameBarThickness*2, barDepth), barMat);
+    leftBar.position.set(-(paintingW/2 + frameBarThickness/2), 0, 0);
+    paintingGroup.add(leftBar);
+
+    // right bar
+    const rightBar = leftBar.clone();
+    rightBar.position.set((paintingW/2 + frameBarThickness/2), 0, 0);
+    paintingGroup.add(rightBar);
+
+    // top bar
+    const topBar = new THREE.Mesh(new THREE.BoxGeometry(paintingW + frameBarThickness*2, frameBarThickness, barDepth), barMat);
+    topBar.position.set(0, (paintingH/2 + frameBarThickness/2), 0);
+    paintingGroup.add(topBar);
+
+    // bottom bar
+    const bottomBar = topBar.clone();
+    bottomBar.position.set(0, -(paintingH/2 + frameBarThickness/2), 0);
+    paintingGroup.add(bottomBar);
+
+    // position painting group on back wall
+    paintingGroup.position.set(0, 5.5, -19.5);
+
+    let frameStyle = 0;      // toggles painting style
+    let frameActive = false; // toggles frame animation
+
+    // --- Statue (gltf) ---
+    const gltfLoader = new GLTFLoader();
+    let statue = null;
+    let statueCenter = new THREE.Vector3();
+    let statueHeight = 5.0;
+
+    gltfLoader.load('./statue/scene.gltf', (gltf) => {
+      statue = gltf.scene;
+      statue.traverse((c) => {
+        if (c.isMesh) {
+          c.castShadow = true;
+          c.receiveShadow = true;
+          if (c.material && c.material.isMeshStandardMaterial) {
+            c.material.metalness = 0.2;
+            c.material.roughness = 0.6;
+          }
+        }
+      });
+
+      const box = new THREE.Box3().setFromObject(statue);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+
+      const desiredHeight = 5.0;
+      const scaleFactor = size.y > 0 ? (desiredHeight / size.y) : 1.0;
+      statue.scale.setScalar(scaleFactor);
+
+      const scaledBox = new THREE.Box3().setFromObject(statue);
+      scaledBox.getCenter(statueCenter);
+      const scaledSize = new THREE.Vector3();
+      scaledBox.getSize(scaledSize);
+      statueHeight = scaledSize.y;
+
+      statue.position.y = scaledSize.y / 2;
+      statue.position.z = -2.5;
+      statue.position.x = 0;
+
+      scene.add(statue);
+    }, undefined, err => console.error(err));
+
+    // --- Lighting ---
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.4));
+    scene.add(new THREE.AmbientLight(0x222222, 0.4));
+
+    // Spotlight orbiting & focused on statue
+    const spotLight = new THREE.SpotLight(0xffffff, 400, 60, Math.PI/6, 0.25, 2);
+    spotLight.castShadow = true;
+    spotLight.shadow.mapSize.width = 2048;
+    spotLight.shadow.mapSize.height = 2048;
+    spotLight.shadow.camera.near = 0.5;
+    spotLight.shadow.camera.far = 80;
+    scene.add(spotLight);
+    scene.add(spotLight.target);
+
+    // --- Animation loop ---
+    function animate() {
+      requestAnimationFrame(animate);
+
+      controls.autoRotate = autoRotate;
+      controls.autoRotateSpeed = 2.0;
+      controls.update();
+
+      // move spotlight around statue and keep it targeted
+      if (statue) {
+        const time = performance.now() * 0.001;
+        const radius = 6.0;
+        spotLight.position.set(
+          statueCenter.x + Math.sin(time) * radius,
+          statueHeight + 5.0,
+          statueCenter.z + Math.cos(time) * radius
+        );
+        spotLight.target.position.copy(statueCenter);
+        spotLight.target.updateMatrixWorld();
+      }
+
+      // update painting shader time
+      paintingUniforms.time.value = performance.now() * 0.001;
+
+      // frame animation (rotate or pulse)
+      if (frameActive) {
+        const t = performance.now() * 0.001;
+        if (frameStyle === 0) {
+          paintingGroup.rotation.y = Math.sin(t) * 0.2;
+          paintingGroup.scale.set(1,1,1);
+        } else {
+          const s = 1 + Math.sin(t * 3.0) * 0.08;
+          paintingGroup.scale.set(s,s,s);
+          paintingGroup.rotation.y = 0;
+        }
+      } else {
+        paintingGroup.rotation.y = 0;
+        paintingGroup.scale.set(1,1,1);
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // --- Resize ---
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // --- Keyboard ---
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'r' || e.key === 'R') {
+        autoRotate = !autoRotate;
+      } 
+      if (e.key === 'q' || e.key === 'Q') {
+        const isDefault = floorUniforms.color1.value.equals(new THREE.Color(0x111111));
+        floorUniforms.color1.value.set(isDefault ? 0x228B22 : 0x111111);
+        floorUniforms.color2.value.set(isDefault ? 0xFFD700 : 0xaaaaaa);
+      }
+      if (e.key === 'w' || e.key === 'W') {
+        const isDefault = floorUniforms.color1.value.equals(new THREE.Color(0x111111));
+        floorUniforms.color1.value.set(isDefault ? 0xaaaaaa : 0x111111);
+        floorUniforms.color2.value.set(isDefault ? 0x111111 : 0xaaaaaa);
+      }
+      if (e.key === 't' || e.key === 'T') {
+        // toggle painting style AND frame animation
+        frameActive = !frameActive;
+        frameStyle = (frameStyle + 1) % 2;
+        paintingUniforms.style.value = frameStyle;
+      }
+    });
+
+  </script>
+</body>
+</html>
