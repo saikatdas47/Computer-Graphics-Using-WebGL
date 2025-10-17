@@ -7,8 +7,7 @@ It features an **animated painting with custom shaders**, a **realistic statue m
 ---
 
 ## 🎥 Demo Video
-▶️ [Watch on YouTube](https://youtu.be/XWSK_ElK4pA?feature=shared)**
-▶️ [Reels on YouTube](https://www.youtube.com/shorts/59a9YbGha1U)
+▶️ [Watch on YouTube](https://youtu.be/XWSK_ElK4pA?feature=shared)
 
 ---
 ## 🖼️ Screenshots  
